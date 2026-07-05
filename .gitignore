@@ -22,5 +22,18 @@ runs/
 # Colab CLI local state
 .colab/
 
+# Secrets / credentials — NEVER commit these
+.env
+.env.*
+!.env.example
+token.json
+*.token
+credentials.json
+*credentials*.json
+secrets.*
+*.pem
+*.key
+.ipynb_checkpoints/
+
 # Reference paper (kept local, not in git)
 docs/*.pdf
