@@ -1,0 +1,41 @@
+# Nano config (~50-60M params) — starting point, we'll finalize together.
+# Structure faithful to MAI-Base-1 (Table 1) but counts shrunk to fit the budget.
+
+model:
+  vocab_size: 16000        # small BPE (o200k's 200k won't fit the budget)
+  dim: 512
+  n_layers: 8
+  n_heads: 8
+  n_kv_heads: 2            # GQA
+  head_dim: 64
+  # attention interleave
+  local_global_ratio: 5    # 5 local : 1 global
+  sliding_window: 512
+  rope_theta: 10000.0
+  # feed-forward
+  ffn_mult: 2              # dense FFN hidden = 2 * dim (SwiGLU)
+  moe:
+    n_experts: 8
+    top_k: 2
+    latent_compression: 2  # down-proj dim = dim / 2
+    expert_mult: 3         # expert FFN hidden = 3 * latent_dim
+  norm_eps: 1.0e-6
+  init_std: 0.02
+  dropout: 0.15
+
+train:
+  seq_len: 1024
+  batch_size: 16           # tune to GPU
+  lr_peak: 2.0e-4
+  lr_min: 2.0e-5
+  weight_decay: 0.1
+  wd_attn: 0.01
+  wd_embed: 0.005
+  betas: [0.95, 0.925]
+  eps: 1.0e-8
+  grad_clip: 1.0
+  warmup_tokens: 20_000_000
+  max_tokens: 500_000_000  # a few hundred M is plenty at nano scale
+
+data:
+  dataset: DKYoon/SlimPajama-6B

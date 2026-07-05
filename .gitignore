@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Editor / OS
+.claude/
+.DS_Store
+.vscode/
+
+# Data & artifacts (kept out of git — large / regenerable)
+data/
+checkpoints/
+*.pt
+*.bin
+*.safetensors
+wandb/
+runs/
+
+# Colab CLI local state
+.colab/
+
+# Reference paper (kept local, not in git)
+docs/*.pdf

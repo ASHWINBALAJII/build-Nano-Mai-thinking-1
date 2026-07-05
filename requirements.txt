@@ -1,0 +1,13 @@
+# Core modelling / training
+torch>=2.4          # runs on Colab GPU; CPU wheel used locally for unit tests
+numpy
+einops
+
+# Data + tokenizer
+datasets            # streaming SlimPajama-6B (DKYoon/SlimPajama-6B)
+tokenizers          # train the small ~16k BPE
+tqdm
+pyyaml
+
+# Remote Colab GPU from the terminal (macOS/Linux only)
+google-colab-cli
