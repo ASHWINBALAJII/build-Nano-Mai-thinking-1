@@ -37,3 +37,10 @@ secrets.*
 
 # Reference paper (kept local, not in git)
 docs/*.pdf
+
+# IDE type-checker configs
+pyrefly.toml
+pyrightconfig.json
+
+# Scratch / experiments
+scratch/
