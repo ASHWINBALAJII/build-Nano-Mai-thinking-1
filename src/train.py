@@ -10,6 +10,7 @@ def rotate_half(x):
 
 
 class RoPE(nn.Module):
+    
     def __init__(self, head_dim, base, block_size):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
@@ -19,9 +20,9 @@ class RoPE(nn.Module):
         self.register_buffer("cos", emb.cos(), persistent=False)
         self.register_buffer("sin", emb.sin(), persistent=False)
 
-    def forward(self, x):                                # x: (B, nh, T, hd)
+    def forward(self, x):                                # x: (B, nh, T, hs)
         T = x.size(2)
-        cos = self.cos[:T][None, None]                   # (1, 1, T, hd)
+        cos = self.cos[:T][None, None]                   # (1, 1, T, hs)
         sin = self.sin[:T][None, None]
         return x * cos + rotate_half(x) * sin
 
@@ -44,14 +45,14 @@ class GQA(nn.Module):
     self.q_norm = nn.RMSNorm(config.head_dim)
     self.k_norm = nn.RMSNorm(config.head_dim)
 
-    # RoPE only on local layers; global layers dont have any
+    # RoPE only on local layers , global layers dont have any
     self.rope = RoPE(config.head_dim, config.rope_base, config.block_size) if is_local else None
 
     # sliding-window mask (local) or full-causal mask (global)
-    bs = config.block_size
-    causal = torch.tril(torch.ones(bs, bs))
-    mask = causal - torch.tril(torch.ones(bs, bs), -config.window_size) if is_local else causal
-    self.register_buffer("bias", mask.view(1, 1, bs, bs))
+ 
+    causal = torch.tril(torch.ones(config.block_size, config.block_size))
+    mask = causal - torch.tril(torch.ones(config.block_size, config.block_size), -config.window_size) if is_local else causal
+    self.register_buffer("bias", mask.view(1, 1, config.block_size, config.block_size))
 
   def forward(self, x):
     B, T, C = x.size()
@@ -82,4 +83,14 @@ class GQA(nn.Module):
     y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_dim)
     y = self.c_proj(y)
     return y
-    
+
+class MLP(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc   = nn.Linear(config.n_embd, config.ffn_dim, bias=False)   # up   projection
+        self.c_gate = nn.Linear(config.n_embd, config.ffn_dim, bias=False)   # gate projection
+        self.c_proj = nn.Linear(config.ffn_dim, config.n_embd, bias=False)   # down projection
+
+    def forward(self, x):
+        return self.c_proj(F.silu(self.c_gate(x)) * self.c_fc(x))
