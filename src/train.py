@@ -10,7 +10,7 @@ def rotate_half(x):
 
 
 class RoPE(nn.Module):
-    
+
     def __init__(self, head_dim, base, block_size):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
@@ -84,13 +84,64 @@ class GQA(nn.Module):
     y = self.c_proj(y)
     return y
 
-class MLP(nn.Module):
-
+class MLP(nn.Module):                         # dense FFN 
     def __init__(self, config):
         super().__init__()
-        self.c_fc   = nn.Linear(config.n_embd, config.ffn_dim, bias=False)   # up   projection
-        self.c_gate = nn.Linear(config.n_embd, config.ffn_dim, bias=False)   # gate projection
-        self.c_proj = nn.Linear(config.ffn_dim, config.n_embd, bias=False)   # down projection
-
+        hidden = config.dense_ffn // 2        # Table FFN = 2*hidden
+        self.c_fc   = nn.Linear(config.n_embd, hidden, bias=False)   # up
+        self.c_gate = nn.Linear(config.n_embd, hidden, bias=False)   # gate
+        self.c_proj = nn.Linear(hidden, config.n_embd, bias=False)   # down
     def forward(self, x):
         return self.c_proj(F.silu(self.c_gate(x)) * self.c_fc(x))
+
+class Expert(nn.Module):                       
+    def __init__(self, config):
+        super().__init__()
+        hidden = config.expert_ffn // 2       # In the paper Expert FFN  = 2*hidden
+        self.c_fc   = nn.Linear(config.d_latent, hidden, bias=False)
+        self.c_gate = nn.Linear(config.d_latent, hidden, bias=False)
+        self.c_proj = nn.Linear(hidden, config.d_latent, bias=False)
+    def forward(self, x):
+        return self.c_proj(F.silu(self.c_gate(x)) * self.c_fc(x))
+
+
+class Router(nn.Module):                      # softmax gating on the ORIGINAL representation
+    def __init__(self, config):
+        super().__init__()
+        self.top_k, self.num_experts = config.top_k, config.num_experts
+        self.gate = nn.Linear(config.n_embd, config.num_experts, bias=False)
+    def forward(self, x):
+        probs = F.softmax(self.gate(x), dim=-1)
+        top_probs, top_idx = torch.topk(probs, self.top_k, dim=-1)
+        top_probs = top_probs / top_probs.sum(dim=-1, keepdim=True)   # renormalize chosen gates
+        return top_probs, top_idx, probs
+
+class SparseMoE(nn.Module):                   # Latent MoE
+    def __init__(self, config):
+        super().__init__()
+        self.num_experts, self.top_k, self.aux_alpha = config.num_experts, config.top_k, config.aux_alpha
+        self.router  = Router(config)
+        self.w_down  = nn.Linear(config.n_embd, config.d_latent, bias=False)   # shared squeeze
+        self.w_up    = nn.Linear(config.d_latent, config.n_embd, bias=False)   # shared expand
+        self.experts = nn.ModuleList([Expert(config) for _ in range(config.num_experts)])
+    def forward(self, x):
+        B, T, C = x.size()
+        gates, indices, probs = self.router(x)         # router sees ORIGINAL x
+        latent = self.w_down(x)                        # squeeze -> (B, T, d_latent)
+        fl = latent.view(-1, latent.size(-1))
+        fg, fi = gates.view(-1, self.top_k), indices.view(-1, self.top_k)
+        N = fi.size(0)
+        out = torch.zeros_like(fl)                     # dropless accumulation in latent space
+        for i, expert in enumerate(self.experts):
+            m = (fi == i); tm = m.any(-1)
+            if tm.any():
+                gv = (fg * m).sum(-1)[tm].unsqueeze(1)
+                out[tm] += expert(fl[tm]) * gv
+        out = self.w_up(out.view(B, T, -1))            # expand -> (B, T, n_embd)
+        # GShard global-batch load-balance loss
+        counts = torch.zeros(self.num_experts, device=x.device)
+        counts.scatter_add_(0, fi.view(-1), torch.ones(fi.numel(), device=x.device))
+        f_i = counts / (N * self.top_k)
+        P_i = probs.view(-1, self.num_experts).mean(0)
+        aux = self.num_experts * (f_i * P_i).sum()
+        return out, self.aux_alpha * aux
