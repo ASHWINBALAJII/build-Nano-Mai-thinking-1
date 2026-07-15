@@ -2,7 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from dataclasses import dataclass
 
 def rotate_half(x):
     x1, x2 = x.chunk(2, dim=-1)
@@ -69,7 +69,7 @@ class GQA(nn.Module):
 
     if self.rope is not None:                        # NoPE on global layers
       q = self.rope(q)
-      k = self.rope(k)                               # k still nkv heads — cheaper
+      k = self.rope(k)                               
 
     heads_per_group = self.n_head // self.n_kv_head
     k = k.repeat_interleave(heads_per_group, dim=1)  # (B, nh, T, hs)
@@ -105,7 +105,7 @@ class Expert(nn.Module):
         return self.c_proj(F.silu(self.c_gate(x)) * self.c_fc(x))
 
 
-class Router(nn.Module):                      # softmax gating on the ORIGINAL representation
+class Router(nn.Module):                      # softmax gating on the ORIGINaL representation
     def __init__(self, config):
         super().__init__()
         self.top_k, self.num_experts = config.top_k, config.num_experts
@@ -126,8 +126,8 @@ class SparseMoE(nn.Module):                   # Latent MoE
         self.experts = nn.ModuleList([Expert(config) for _ in range(config.num_experts)])
     def forward(self, x):
         B, T, C = x.size()
-        gates, indices, probs = self.router(x)         # router sees ORIGINAL x
-        latent = self.w_down(x)                        # squeeze -> (B, T, d_latent)
+        gates, indices, probs = self.router(x)         # router sees ORIGINAL x ( that is the actual embedding dim)
+        latent = self.w_down(x)                        # squeeze becomes (B, T, d_latent)
         fl = latent.view(-1, latent.size(-1))
         fg, fi = gates.view(-1, self.top_k), indices.view(-1, self.top_k)
         N = fi.size(0)
@@ -147,6 +147,25 @@ class SparseMoE(nn.Module):                   # Latent MoE
         return out, self.aux_alpha * aux
 
 class Block(nn.Module):
+    def __init__(self,config,layer_idx):
+        super().__init__()
+        self.ln_1 = nn.RMSNorm(config.n_embd)
+        is_local=(layer_idx+1)%config.global_every != 0
+        self.attn=GQA(config,is_local)
+        self.ln_2=nn.RMSNorm(config.n_embd)
+        # first is MLP then alternatively MOE and MLP
+        self.use_moe=(layer_idx != 0) and (layer_idx % 2 == 1)
+        self.ffn=SparseMoE(config) if self.use_moe else MLP(config)
+    def forward(self,x):
+        x=x+self.attn(self.ln_1(x))
+        if self.use_moe:
+            f,aux=self.ffn(self.ln_2(x))
+        else:
+            f,aux=self.ffn(self.ln_2(x)), torch.zeros((), device=x.device)
+        x=x+f
+        return x,aux
+        
+
 
 
 
