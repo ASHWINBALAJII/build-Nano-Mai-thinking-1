@@ -145,3 +145,47 @@ class SparseMoE(nn.Module):                   # Latent MoE
         P_i = probs.view(-1, self.num_experts).mean(0)
         aux = self.num_experts * (f_i * P_i).sum()
         return out, self.aux_alpha * aux
+
+class Block(nn.Module):
+
+
+
+
+
+
+
+
+@dataclass
+class MAIConfig:
+    
+    n_layer:     int = 12          # L — must be a multiple of 6
+
+    block_size:  int = 1024
+    vocab_size:  int = 50304
+
+
+    head_dim:    int = 128
+    n_kv_head:   int = 8
+    num_experts: int = 512
+    top_k:       int = 8
+    window_size: int = 512
+    rope_base:   int = 10000
+    global_every: int = 6          # every 6th layer is global
+    aux_alpha: float = 0.01
+
+    #derived from L (filled automatically) 
+    n_embd:      int = 0
+    n_head:      int = 0
+    dense_ffn:   int = 0
+    d_latent:    int = 0
+    expert_ffn:  int = 0
+
+    def __post_init__(self):
+        assert self.n_layer % 6 == 0, "L must be a multiple of 6 (last layer must be global)"
+        D = self.n_layer * 256 // 3              # D = L * 256/3
+        self.n_embd     = D
+        self.n_head     = 8 * round(self.n_layer/8) # round L up to nearest 8
+        self.dense_ffn  = 2 * D                  # dense FFN expands 2x  (module does //2)
+        self.d_latent   = D // 2                 # Latent MoE: 2x compression
+        self.expert_ffn = (3 * self.d_latent)  # experts expand 3x
+
