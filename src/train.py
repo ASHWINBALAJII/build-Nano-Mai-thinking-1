@@ -97,7 +97,7 @@ class MLP(nn.Module):                         # dense FFN
 class Expert(nn.Module):                       
     def __init__(self, config):
         super().__init__()
-        hidden = config.expert_ffn // 2       # In the paper Expert FFN  = 2*hidden
+        hidden = config.expert_ffn      # In the paper Expert FFN  = 2*hidden
         self.c_fc   = nn.Linear(config.d_latent, hidden, bias=False)
         self.c_gate = nn.Linear(config.d_latent, hidden, bias=False)
         self.c_proj = nn.Linear(hidden, config.d_latent, bias=False)
@@ -164,8 +164,6 @@ class Block(nn.Module):
             f,aux=self.ffn(self.ln_2(x)), torch.zeros((), device=x.device)
         x=x+f
         return x,aux
-        
-
 
 
 
@@ -207,4 +205,24 @@ class MAIConfig:
         self.dense_ffn  = 2 * D                  # dense FFN expands 2x  (module does //2)
         self.d_latent   = D // 2                 # Latent MoE: 2x compression
         self.expert_ffn = (3 * self.d_latent)  # experts expand 3x
+
+class MAI(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config=config
+        self.transformer=nn.ModuleDict(dict(
+            wte=nn.Embedding(config.vocab_size,config.n_embd),
+            h=nn.ModuleList([Block(config, i) for i in range(config.n_layer)]),
+            ln_f = nn.RMSNorm(config.n_embd),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+    
+        
+
+
+
+
+
+
+
 
