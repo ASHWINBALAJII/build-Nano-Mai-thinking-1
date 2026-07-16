@@ -209,14 +209,28 @@ class MAIConfig:
 class MAI(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.config=config
-        self.transformer=nn.ModuleDict(dict(
-            wte=nn.Embedding(config.vocab_size,config.n_embd),
-            h=nn.ModuleList([Block(config, i) for i in range(config.n_layer)]),
-            ln_f = nn.RMSNorm(config.n_embd),
-        ))
+        self.config = config
+        self.wte  = nn.Embedding(config.vocab_size, config.n_embd)
+        self.h    = nn.ModuleList([Block(config, i) for i in range(config.n_layer)])
+        self.ln_f = nn.RMSNorm(config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        self.wte.weight = self.lm_head.weight          # weight tying 
+    def forward(self,idx,targets=None):
+        B,T=idx.size()
+        tok_emb=self.wte(idx)
+        total_aux=torch.zeros((),device=idx.device)
+        x=tok_emb
+        for block in self.h:
+            x,aux=block(x)
+            total_aux=total_aux+aux
+        x=self.ln_f(x)
+        logits=self.lm_head(x)
+        return logits 
     
+
+
+
         
 
 
