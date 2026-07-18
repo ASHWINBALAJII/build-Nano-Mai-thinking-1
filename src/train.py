@@ -1,5 +1,7 @@
+from torch import topk
 import math
 import torch
+from torch import device
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
@@ -87,7 +89,7 @@ class GQA(nn.Module):
 class MLP(nn.Module):                         # dense FFN 
     def __init__(self, config):
         super().__init__()
-        hidden = config.dense_ffn // 2        # Table FFN = 2*hidden
+        hidden = config.dense_ffn // 2        # FFN = 2*hidden
         self.c_fc   = nn.Linear(config.n_embd, hidden, bias=False)   # up
         self.c_gate = nn.Linear(config.n_embd, hidden, bias=False)   # gate
         self.c_proj = nn.Linear(hidden, config.n_embd, bias=False)   # down
@@ -97,7 +99,7 @@ class MLP(nn.Module):                         # dense FFN
 class Expert(nn.Module):                       
     def __init__(self, config):
         super().__init__()
-        hidden = config.expert_ffn      # In the paper Expert FFN  = 2*hidden
+        hidden = config.expert_ffn //2     #Expert FFN = 2*hidden
         self.c_fc   = nn.Linear(config.d_latent, hidden, bias=False)
         self.c_gate = nn.Linear(config.d_latent, hidden, bias=False)
         self.c_proj = nn.Linear(hidden, config.d_latent, bias=False)
@@ -178,7 +180,7 @@ class MAIConfig:
     n_layer:     int = 12          # L — must be a multiple of 6
 
     block_size:  int = 1024
-    vocab_size:  int = 50304
+    vocab_size:  int = 200019 
 
 
     head_dim:    int = 128
@@ -226,8 +228,77 @@ class MAI(nn.Module):
             total_aux=total_aux+aux
         x=self.ln_f(x)
         logits=self.lm_head(x)
-        return logits 
-    
+        total_loss=None
+        if targets is not None:
+            lm_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            total_loss=lm_loss+total_aux  # add aux loss
+        return logits,total_loss 
+
+
+
+
+#auto detect device
+device = "cpu"
+if torch.cuda.is_available():
+    device = "cuda"
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = "mps"
+print(f"using device: {device}")
+
+import tiktoken
+enc = tiktoken.get_encoding('o200k_base')
+
+model = MAI(MAIConfig())
+model.eval()
+model.to(device)
+
+
+with open('input.txt', 'r') as f:
+    text = f.read()
+tokens = enc.encode(text[:1000])
+B, T = 4, 32
+buf = torch.tensor(tokens[:B*T + 1])
+buf = buf.to(device)
+x = buf[:-1].view(B, T).to(device)
+y = buf[1:].view(B, T).to(device)
+
+
+#optimize
+optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4)
+for i in range(100):
+    optimizer.zero_grad()
+    logits, loss = model(x, y)
+    loss.backward()
+    optimizer.step()
+    print(f"step{i}, loss:{loss.item()}")
+
+
+
+num_return_sequences = 5
+max_length = 100
+
+tokens = enc.encode("Hello, Ashwin here , and I ")
+tokens = torch.tensor(tokens, dtype=torch.long)
+x = tokens.unsqueeze(0).repeat(num_return_sequences, 1).to(device)   # (5, T)
+
+torch.manual_seed(42)
+if device == "cuda":
+    torch.cuda.manual_seed(42)
+
+while x.size(1) < max_length:
+    with torch.no_grad():
+        logits, _ = model(x)
+        logits = logits[:, -1, :]
+        probs = F.softmax(logits, dim=-1)
+        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+        ix = torch.multinomial(topk_probs, num_samples=1)
+        xcol = torch.gather(topk_indices, -1, ix)                   # (B, 1)
+        x = torch.cat((x, xcol), dim=1)
+
+for i in range(num_return_sequences):
+    print(">", enc.decode(x[i, :max_length].tolist()))
+
+
 
 
 
