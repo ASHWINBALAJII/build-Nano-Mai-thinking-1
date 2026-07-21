@@ -37,6 +37,7 @@ class GQA(nn.Module):
     self.key   = nn.Linear(config.n_embd, config.n_kv_head * config.head_dim, bias=False)
     self.value = nn.Linear(config.n_embd, config.n_kv_head * config.head_dim, bias=False)
     self.c_proj = nn.Linear(config.n_head * config.head_dim, config.n_embd, bias=False)
+    self.c_proj.MAI_SCALE_INIT = 1
 
     self.n_head    = config.n_head
     self.n_kv_head = config.n_kv_head
@@ -93,6 +94,7 @@ class MLP(nn.Module):                         # dense FFN
         self.c_fc   = nn.Linear(config.n_embd, hidden, bias=False)   # up
         self.c_gate = nn.Linear(config.n_embd, hidden, bias=False)   # gate
         self.c_proj = nn.Linear(hidden, config.n_embd, bias=False)   # down
+        self.c_proj.MAI_SCALE_INIT = 1
     def forward(self, x):
         return self.c_proj(F.silu(self.c_gate(x)) * self.c_fc(x))
 
@@ -125,6 +127,7 @@ class SparseMoE(nn.Module):                   # Latent MoE
         self.router  = Router(config)
         self.w_down  = nn.Linear(config.n_embd, config.d_latent, bias=False)   # shared squeeze
         self.w_up    = nn.Linear(config.d_latent, config.n_embd, bias=False)   # shared expand
+        self.w_up.MAI_SCALE_INIT = 1
         self.experts = nn.ModuleList([Expert(config) for _ in range(config.num_experts)])
     def forward(self, x):
         B, T, C = x.size()
@@ -149,23 +152,27 @@ class SparseMoE(nn.Module):                   # Latent MoE
         return out, self.aux_alpha * aux
 
 class Block(nn.Module):
-    def __init__(self,config,layer_idx):
+    def __init__(self, config, layer_idx):
         super().__init__()
         self.ln_1 = nn.RMSNorm(config.n_embd)
-        is_local=(layer_idx+1)%config.global_every != 0
-        self.attn=GQA(config,is_local)
-        self.ln_2=nn.RMSNorm(config.n_embd)
-        # first is MLP then alternatively MOE and MLP
-        self.use_moe=(layer_idx != 0) and (layer_idx % 2 == 1)
-        self.ffn=SparseMoE(config) if self.use_moe else MLP(config)
-    def forward(self,x):
-        x=x+self.attn(self.ln_1(x))
+        is_local = (layer_idx + 1) % config.global_every != 0
+        self.attn = GQA(config, is_local)
+        self.ln_1_post = nn.RMSNorm(config.n_embd)
+        self.ln_1_post.MAI_ZERO_INIT = 1              
+        self.ln_2 = nn.RMSNorm(config.n_embd)
+        self.use_moe = (layer_idx != 0) and (layer_idx % 2 == 1)
+        self.ffn = SparseMoE(config) if self.use_moe else MLP(config)
+        self.ln_2_post = nn.RMSNorm(config.n_embd)
+        self.drop = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = x + self.drop(self.ln_1_post(self.attn(self.ln_1(x))))
         if self.use_moe:
-            f,aux=self.ffn(self.ln_2(x))
+            f, aux = self.ffn(self.ln_2(x))
         else:
-            f,aux=self.ffn(self.ln_2(x)), torch.zeros((), device=x.device)
-        x=x+f
-        return x,aux
+            f, aux = self.ffn(self.ln_2(x)), torch.zeros((), device=x.device)
+        x = x + self.drop(self.ln_2_post(f))
+        return x, aux
 
 
 
@@ -191,6 +198,7 @@ class MAIConfig:
     rope_base:   int = 10000
     global_every: int = 6          # every 6th layer is global
     aux_alpha: float = 0.01
+    dropout: float = 0.15
 
     #derived from L (filled automatically) 
     n_embd:      int = 0
@@ -218,6 +226,23 @@ class MAI(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         self.wte.weight = self.lm_head.weight          # weight tying 
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'MAI_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5    # 2 residual writes per layer
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, nn.RMSNorm):
+            if hasattr(module, 'MAI_ZERO_INIT'):
+                torch.nn.init.zeros_(module.weight)          # attention output → 0 at init
+            else:
+                torch.nn.init.ones_(module.weight)    
     def forward(self,idx,targets=None):
         B,T=idx.size()
         tok_emb=self.wte(idx)
@@ -234,7 +259,7 @@ class MAI(nn.Module):
             total_loss=lm_loss+total_aux  # add aux loss
         return logits,total_loss 
 
-
+    
 
 
 #auto detect device
@@ -244,6 +269,11 @@ if torch.cuda.is_available():
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print(f"using device: {device}")
+
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
+
 
 import tiktoken
 
@@ -257,7 +287,7 @@ class DataLoaderLite:
         self.B = B
         self.T = T
 
-        # at init load tokens from disk and store them in memory
+       
         with open('input.txt', 'r') as f:
             text = f.read()
         enc = tiktoken.get_encoding('gpt2')
@@ -276,7 +306,7 @@ class DataLoaderLite:
         y = (buf[1:]).view(B, T) # targets
         # advance the position in the tensor
         self.current_position += B * T
-        # if loading the next batch would be out of bounds, reset
+       
         if self.current_position + (B * T + 1) > len(self.tokens):
             self.current_position = 0
         return x, y
@@ -299,9 +329,7 @@ for i in range(100):
 num_return_sequences = 5
 max_length = 100
 
-tokens = enc.encode("Hello, Ashwin here , and I ")
-tokens = torch.tensor(tokens, dtype=torch.long)
-x = tokens.unsqueeze(0).repeat(num_return_sequences, 1).to(device)   # (5, T)
+
 
 torch.manual_seed(42)
 if device == "cuda":
@@ -317,8 +345,8 @@ while x.size(1) < max_length:
         xcol = torch.gather(topk_indices, -1, ix)                   # (B, 1)
         x = torch.cat((x, xcol), dim=1)
 
-for i in range(num_return_sequences):
-    print(">", enc.decode(x[i, :max_length].tolist()))
+'''for i in range(num_return_sequences):
+    print(">", enc.decode(x[i, :max_length].tolist()))'''
 
 
     
